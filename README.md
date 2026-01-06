@@ -1,2 +1,2 @@
-# myrepo
+# EMPRESSdk
 R scripts for EMPRESS code
