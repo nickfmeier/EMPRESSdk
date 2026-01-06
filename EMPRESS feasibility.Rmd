@@ -15,7 +15,7 @@ output: html_document
 
 -   Version 1.1, date:
 
-    -   Removed space between lettering and changed full variable name to lower bracket in section 3.4 subsection 3. s s s
+    -   Removed space between lettering and changed full variable name to lower bracket in section 3.4 subsection 3.
 
     -   Stratified event_type to separate variables in section 3.1 subsection 1 + 2.
 
