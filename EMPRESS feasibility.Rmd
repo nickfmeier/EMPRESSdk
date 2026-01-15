@@ -5,7 +5,51 @@ date: "2026-01-15"
 output: html_document
 ---
 
-```{r}
+## 1.0 Load libraries
 
+```{r include=FALSE}
+library(nanoparquet)
+library(tidyverse)
+library(openxlsx)
+library(stringi)
+library(janitor)
 ```
 
+## 2.0 Load data
+
+```{r include=FALSE}
+# -------- Paths to exported data files --------
+data_dir <- "C:/Users/nmei0013/Downloads"
+f_forms <- file.path(data_dir, "export-export_forms_empress_domain_20251221105418.parquet")
+f_events <- file.path(data_dir, "export-export_events_empress_platform_20251209150608.parquet")
+allocation <- file.path(data_dir, "export-export_allocations_empress_domain_20251212112744.parquet")
+
+# -------- Load data from parquet files --------
+EMPRESS_forms <- read_parquet(f_forms)
+EMPRESS_events <- read_parquet(f_events)
+EMPRESS_allocation <- read_parquet(allocation)
+```
+
+## 3.0 Data cleaning
+
+### 3.1 Creation of master set
+
+```{r}
+# Use EMPRESS_events to define first 200 participants included
+EMPRESS_feasibility_master <- EMPRESS_events %>% 
+  # keep only enrolment rows
+  filter(str_detect(event_type_name, "enrolment")) %>% 
+  
+  # order by time to pick the FIRST 200 enrolled participants
+  arrange(timestamp) %>% 
+  
+  # pick first 200 unique ssid
+  distinct(ssid, .keep_all = TRUE) %>% 
+  slice_head(n = 200) %>% 
+  
+  # rename timestamp to rand_time
+  rename(rand_time = timestamp) %>%
+  
+  # keep only relevant columns
+  select(ssid, enrolment_site, rand_time)
+```
