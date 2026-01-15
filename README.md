@@ -1,2 +1,2 @@
 # EMPRESSdk
-R scripts for EMPRESS code
+R script for EMPRESS feasibility analysis
