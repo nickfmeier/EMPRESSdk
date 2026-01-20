@@ -179,7 +179,7 @@ rm(
   py_obj_rows_forms,
   py_obj_summary_forms,
   uuid_obj_rows_forms,
-  UUID_obj_summary_forms
+  uuid_obj_summary_forms
 )
 ```
 
@@ -383,10 +383,28 @@ EMPRESS_forms_all <- bind_rows(
 
 ```{r}
 #------------------------------------------------------------
-# Subset events on enrolled participants
+# 1) Subset events on enrolled participants
 #------------------------------------------------------------
 EMPRESS_events_enrol <- EMPRESS_events %>% 
   filter(ssid %in% EMPRESS_master_feasibility$ssid)
+ 
+#------------------------------------------------------------
+# 2) All events
+#    - Creating responsible site for events
+#------------------------------------------------------------
+events_master_enrol <- EMPRESS_events_enrol %>% 
+  mutate(
+    responsible_site = case_when(
+      event_type_name == "enrolment" ~ str_squish(as.character(enrolment_site)),
+      event_type_name == "relocate"  ~ str_to_lower(str_squish(str_extract(as.character(event_description), "^[^/]+"))),
+      TRUE ~ NA_character_
+    )
+  ) %>% 
+  group_by(ssid) %>%
+  arrange(desc(enrolment_site), timestamp, .by_group = TRUE) %>%
+  fill(responsible_site, .direction = "down") %>%
+  ungroup() %>% 
+  select(-enrolment_site)
 ```
 
 ## 4.0 Data cleaning
@@ -451,24 +469,16 @@ to_bool <- function(x) {
 # Define hard/soft boundaries (match easyRF, except highest lactate)
 rules <- tibble::tribble(
   ~variable, ~hard_lo, ~hard_hi, ~soft_lo, ~soft_hi, ~unit,
-  
-  # Baseline variables
-  "weight", 20,  500,  22,  150, "kg", 
+  "weight",  20,  500,  22,  150, "kg",
   "height", 120,  240, 150,  200, "cm",
-  "systolic_blood_pressure_lowest", 30,  300,  75,  200, "mmHg", 
-  "crystalloid_volumes_within_24h", 0, 30000, 0, 9999, "mL",
-  "lowest_p_albumin_within_24h", 1, 115, 6, 33, "g/L",
-  "lactate_highest", 2, 40, 2,  13, "mmol/L", 
-    # Changed from easyRF boundaries as plasma lactate >= 2 within 3 hours of randomisation is an inclusion criteria in INCEPT-ALBUMIN. 
-  "creatinine_highest", 15, 2500,  26, 590, "µmol/L",
-  
-  # Dayform variables
-  "albumin_volume_5percent", 0, 9999, 0, 4999, "mL",
-  "albumin_volume_20percent", 0, 9999, 0, 4999, "mL",
-  "total_volume_rbc", 0, 29999, 0, 9999, "mL",
-  "total_fluid_input", 0, 39999, 0, 9999, "mL",
-  "total_fluid_balance", -19999, 19999, -9999, 9999, "mL"
-) 
+  "systolic_blood_pressure_lowest",  30,  300,  60,  240, "mmHg",
+  "fio2_before_randomisation",        0,    1, 0.21,   1, "fraction",
+  "max_oxygen_flow_at_randomisation", 0,  100,   0,  60, "L/min",
+  "arterial_oxygen_saturation",       0,  100,  70, 100, "%",
+  "peripheral_oxygen_saturation",     0,  100,  70, 100, "%",
+  "pao2",                              0,   40,   4,  20, "kPa",
+  "lactate_highest",                   0,   30, 0.5,  20, "mmol/L",
+  "creatinine_highest",                0, 2000,  30, 1500, "µmol/L")
 
 # -------------------------------------------------
 # 2) Restrict to variables to those present in rules and 
@@ -476,8 +486,7 @@ rules <- tibble::tribble(
 #    - create numeric value with missing detected 
 #    - filter on non-missing values
 # -------------------------------------------------
-
-ALBUMIN_forms_numeric <- ALBUMIN_forms_all %>% 
+EMPRESS_forms_numeric <- EMPRESS_forms_all %>% 
   filter(variable_name %in% rules$variable) %>% 
   mutate(
     value_raw = as.character(value),
@@ -487,8 +496,7 @@ ALBUMIN_forms_numeric <- ALBUMIN_forms_all %>%
 # -------------------------------------------------
 # 3) Join validation rules and apply rules 
 # -------------------------------------------------
-
-ALBUMIN_forms_numeric_validation <- ALBUMIN_forms_numeric %>% 
+EMPRESS_forms_numeric_validation <- EMPRESS_forms_numeric %>% 
   inner_join(
     rules,
     by = c("variable_name" = "variable")
@@ -505,7 +513,7 @@ ALBUMIN_forms_numeric_validation <- ALBUMIN_forms_numeric %>%
 # 4) Validation report
 #    - Change datetimes to local time [Make generic at some point]
 # -------------------------------------------------
-validation_outliers_boundaries <- ALBUMIN_forms_numeric_validation %>% 
+validation_outliers_boundaries <- EMPRESS_forms_numeric_validation %>% 
   filter(issue_type %in% c("hard_outlier", "soft_outlier")) %>% 
   transmute(
     id = observation_id,
@@ -528,26 +536,469 @@ validation_outliers_boundaries <- ALBUMIN_forms_numeric_validation %>%
       TRUE ~ NA_character_
       )
     )
-
-validation_outliers_boundaries
 ```
 
 #### 4.2.2 Outliers by distribution
 
 ```{r}
+# -------------------------------------------------
+# 1) Calculate 1%/99% bounds per variable [Change as needed]
+# -------------------------------------------------
+pct_bounds <- EMPRESS_forms_numeric %>% 
+  group_by(variable_name) %>% 
+  summarise(
+    p01 = quantile(value_num, 0.01, na.rm = TRUE),
+    p99 = quantile(value_num, 0.99, na.rm = TRUE),
+    .groups = "drop"
+    )
 
+# -------------------------------------------------
+# 2) Join and flag outliers 
+# -------------------------------------------------
+validation_outliers_pct <- EMPRESS_forms_numeric %>% 
+  left_join(pct_bounds, by = "variable_name") %>% 
+  mutate(
+    issue_type = case_when(
+      value_num < p01 ~ "low_extreme_1pct",
+      value_num > p99 ~ "high_extreme_99pct",
+      TRUE ~ NA_character_
+    ),
+    source = form_layout
+  ) %>% 
+  filter(!is.na(issue_type))
+
+# -------------------------------------------------
+# 3) Validation report
+#    - Change datetimes to local time [Make generic at some point]
+# -------------------------------------------------
+validation_outliers_pct <- validation_outliers_pct %>% 
+  transmute(
+    id = observation_id, 
+    ssid,
+    responsible_site,
+    source,
+    time_point = paste0(with_tz(start_datetime, "Europe/Copenhagen"),
+                        " - ",
+                        with_tz(start_datetime, "Europe/Copenhagen")
+                        ),
+    variable_name,
+    value = value_raw,
+    issue_type,
+    note = case_when(
+      issue_type == "low_extreme_1pct" ~ "extreme value, below 1% of observations",
+      issue_type == "high_extreme_99pct" ~ "extreme value, above 99% of observations",
+      TRUE ~ NA_character_
+    )
+  )
+
+view(validation_outliers_pct)
+
+# -------------------------------------------------
+# 4) Cleanup
+# -------------------------------------------------
+rm(
+  EMPRESS_forms_numeric,
+  EMPRESS_forms_numeric_validation,
+  pct_bounds,
+  rules
+)
 ```
 
-### 4.3 Missing 
+### 4.3 Missing
 
 ```{r}
-
+# -------------------------------------------------
+# 1) Validation report for missing
+# -------------------------------------------------
+validation_missing_values <- EMPRESS_forms_all %>%
+  
+  # Standardise missing  
+  # [As of now, actual confirmed missing (unkowns) and blanks are treated as missing - change if needed. Empty fields in export == not filled]
+  
+  mutate(
+    value_raw = as.character(value),
+    value_std = na_blank(value_raw),
+    source = form_layout
+  ) %>% 
+  
+  # Validation report
+  # - Change datetimes to local time [Make generic at some point]
+  filter(is.na(value_std) | value_std == "Unknown") %>% # [Change if needed]
+  transmute(
+    id = observation_id,
+    ssid,
+    responsible_site,
+    source,
+    time_point = paste0(with_tz(start_datetime, "Europe/Copenhagen"),
+                        " - ",
+                        with_tz(start_datetime, "Europe/Copenhagen")
+                        ),
+    variable_name,
+    value = value_raw,
+    issue_type = "missing_value",
+    note = "Value is missing / not filled in"
+  ) 
 ```
 
 ### 4.4 Date issues
 
 ```{r}
+# -------------------------------------------------
+# 1) Build small anchor table in wide format with observation ids
+# -------------------------------------------------
+# Get form dates
+form_date_vars <- c(
+  "date_of_birth",
+  "date_of_index_hospital_admission"
+)
 
+anchors_date_long <- EMPRESS_forms_all %>%
+  filter(variable_name %in% form_date_vars) %>%
+  transmute(
+    id = observation_id,
+    ssid,
+    responsible_site,
+    source = form_layout,
+    start_datetime,
+    end_datetime,
+    variable_name,
+    value_date = ymd(na_if(trimws(as.character(value)), ""))
+  )
+
+anchors_date_wide <- anchors_date_long %>%
+  select(ssid, responsible_site, variable_name, value_date) %>%
+  pivot_wider(
+    id_cols = c(ssid, responsible_site),
+    names_from = variable_name,
+    values_from = value_date
+  ) %>%
+  left_join(
+    anchors_date_long %>%
+      mutate(var_id = paste0(variable_name, "__id")) %>%
+      select(ssid, responsible_site, var_id, id) %>%
+      pivot_wider(
+        id_cols = c(ssid, responsible_site),
+        names_from = var_id,
+        values_from = id
+      ),
+    by = c("ssid", "responsible_site")
+  )
+
+# Add randomisation time from master (convert to local time)
+anchors <- EMPRESS_master_feasibility %>%
+  transmute(
+    ssid,
+    responsible_site = enrolment_site,
+    rand_time_local = with_tz(rand_datetime_utc, "Europe/Copenhagen"),
+    rand_date = date(rand_time_local)
+  ) %>%
+  left_join(anchors_date_wide, by = c("ssid", "responsible_site"))
+
+# -------------------------------------------------
+# 2) Build canonical event log (EMPRESS) in long format
+# -------------------------------------------------
+empress_plat_keep <- c(
+  "death",
+  "withdrawn_consent",
+  "clinical_decision",
+  "discontinuation_therapy",
+  "involuntary_hospitalisation",
+  "sar_susar",
+  "susar",
+  "consent_from_trial_guardian",
+  "consent_from_relative",
+  "consent_from_participant",
+  "consent_obtained",
+  "relocate"
+)
+
+empress_dom_keep <- c(
+  "withdrawn_consent",
+  "clinical_decision",
+  "sar_susar",
+  "susar"
+)
+
+events <- events_master_enrol %>%
+  filter(event_type_name %in% c(empress_plat_keep, empress_dom_keep)) %>%
+  mutate(
+    event_time_local = with_tz(timestamp, "Europe/Copenhagen"),
+    id = event_id
+  ) %>%
+  select(id, ssid, source, responsible_site, event_type_name, event_time_local)
+
+# -------------------------------------------------
+# 3) Define event groups
+# -------------------------------------------------
+eop_susar_events <- c(
+  "death",
+  "withdrawn_consent",
+  "clinical_decision",
+  "discontinuation_therapy",
+  "involuntary_hospitalisation",
+  "sar_susar",
+  "susar"
+)
+
+relocate_events <- "relocate"
+
+consent_events <- c(
+  "consent_from_trial_guardian",
+  "consent_from_relative",
+  "consent_from_participant",
+  "consent_obtained"
+)
+
+# -------------------------------------------------
+# 4) Validation (set-based)
+# -------------------------------------------------
+events_with_anchor <- events %>%
+  left_join(
+    anchors %>% select(ssid, rand_time_local),
+    by = "ssid"
+  )
+
+# 1) HARD: events before randomisation
+issues_before_rand <- events_with_anchor %>%
+  filter(!is.na(event_time_local), !is.na(rand_time_local)) %>%
+  filter(event_time_local < rand_time_local) %>%
+  transmute(
+    id,
+    ssid,
+    responsible_site,
+    source,
+    time_point = as.character(event_time_local),
+    variable = event_type_name,
+    value = as.character(event_time_local),
+    issue_type = "hard",
+    note = paste0(
+      "Event time (", event_time_local,
+      ") is before randomisation (", rand_time_local, ")"
+    )
+  )
+
+# 2) HARD: events > 90 days after randomisation
+issues_after_90 <- events_with_anchor %>%
+  filter(!is.na(event_time_local), !is.na(rand_time_local)) %>%
+  filter(event_time_local > rand_time_local + days(90)) %>%
+  transmute(
+    id,
+    ssid,
+    responsible_site,
+    source,
+    time_point = as.character(event_time_local),
+    variable = event_type_name,
+    value = as.character(event_time_local),
+    issue_type = "hard",
+    note = paste0(
+      "Event time (", event_time_local,
+      ") is > 90 days after randomisation (", rand_time_local, ")"
+    )
+  )
+
+# 3) HARD: events after death
+death_time <- events %>%
+  filter(event_type_name == "death") %>%
+  group_by(ssid) %>%
+  summarise(
+    death_time = min(event_time_local, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+issues_after_death <- events %>%
+  filter(
+    (event_type_name %in% eop_susar_events & event_type_name != "death") |
+      event_type_name == "consent_from_participant"
+  ) %>%
+  left_join(death_time, by = "ssid") %>%
+  filter(!is.na(event_time_local), !is.na(death_time)) %>%
+  filter(event_time_local > death_time) %>%
+  transmute(
+    id,
+    ssid,
+    responsible_site,
+    source,
+    time_point = as.character(event_time_local),
+    variable = event_type_name,
+    value = as.character(event_time_local),
+    issue_type = "hard",
+    note = paste0(
+      "Event time (", event_time_local,
+      ") is after death time (", death_time, ")"
+    )
+  )
+
+# -------------------------------------------------
+# 5) Baseline validation
+# -------------------------------------------------
+
+baseline_issues <- anchors %>%
+  rowwise() %>%
+  transmute(
+    ssid,
+    responsible_site,
+    issues = list({
+      out <- tibble(
+        variable = character(),
+        issue_type = character(),
+        value = character(),
+        note = character(),
+        id = character()
+      )
+
+      add_issue <- function(out, variable, issue_type, value, note, id = NA_character_) {
+        bind_rows(
+          out,
+          tibble(
+            variable = variable,
+            issue_type = issue_type,
+            value = as.character(value),
+            note = note,
+            id = as.character(id)
+          )
+        )
+      }
+
+      dob <- date_of_birth
+      hosp <- date_of_index_hospital_admission
+      icu <- date_of_index_icu_admission
+      rdt <- rand_date
+
+      dob_id <- date_of_birth__id
+      hosp_id <- date_of_index_hospital_admission__id
+      icu_id <- date_of_index_icu_admission__id
+
+      if (!is.na(dob) && dob > Sys.Date()) {
+        out <- add_issue(out, "date_of_birth", "hard", dob, "DOB is in the future", dob_id)
+      }
+
+      if (!is.na(dob) && !is.na(rdt) && dob > rdt) {
+        out <- add_issue(
+          out, "date_of_birth", "hard", dob,
+          paste0("DOB (", dob, ") is after randomisation date (", rdt, ")"),
+          dob_id
+        )
+      }
+
+      if (!is.na(dob) && !is.na(rdt) && dob <= rdt && interval(dob, rdt) < years(18)) {
+        out <- add_issue(
+          out, "date_of_birth", "hard", dob,
+          paste0("Age < 18 at randomisation date (", rdt, ")"),
+          dob_id
+        )
+      }
+
+      if (!is.na(hosp) && !is.na(dob) && hosp < dob) {
+        out <- add_issue(
+          out, "date_of_index_hospital_admission", "hard", hosp,
+          paste0("Index hospital admission (", hosp, ") before DOB (", dob, ")"),
+          hosp_id
+        )
+      }
+
+      if (!is.na(icu) && !is.na(dob) && icu < dob) {
+        out <- add_issue(
+          out, "date_of_index_icu_admission", "hard", icu,
+          paste0("ICU admission (", icu, ") before DOB (", dob, ")"),
+          icu_id
+        )
+      }
+
+      if (!is.na(hosp) && !is.na(icu) && icu < hosp) {
+        out <- add_issue(
+          out, "date_of_index_icu_admission", "hard", icu,
+          paste0("ICU admission (", icu, ") before hospital admission (", hosp, ")"),
+          icu_id
+        )
+      }
+
+      if (!is.na(hosp) && !is.na(rdt) && hosp > rdt) {
+        out <- add_issue(
+          out, "date_of_index_hospital_admission", "hard", hosp,
+          paste0("Index hospital admission (", hosp, ") is after randomisation date (", rdt, ")"),
+          hosp_id
+        )
+      }
+
+      if (!is.na(icu) && !is.na(rdt) && icu > rdt) {
+        out <- add_issue(
+          out, "date_of_index_icu_admission", "hard", icu,
+          paste0("Index ICU admission (", icu, ") is after randomisation date (", rdt, ")"),
+          icu_id
+        )
+      }
+
+      if (!is.na(hosp) && !is.na(rdt) && interval(hosp, rdt) > years(1)) {
+        out <- add_issue(
+          out, "date_of_index_hospital_admission", "soft", hosp,
+          paste0("Hospital admission (", hosp, ") is > 1 year before randomisation (", rdt, ")"),
+          hosp_id
+        )
+      }
+
+      if (!is.na(icu) && !is.na(rdt) && interval(icu, rdt) > years(1)) {
+        out <- add_issue(
+          out, "date_of_index_icu_admission", "soft", icu,
+          paste0("ICU admission (", icu, ") is > 1 year before randomisation (", rdt, ")"),
+          icu_id
+        )
+      }
+
+      out
+    })
+  ) %>%
+  ungroup() %>%
+  unnest(issues) %>%
+  filter(!is.na(variable)) %>%
+  left_join(
+    ALBUMIN_forms_all %>%
+      transmute(
+        id = observation_id,
+        source = form_layout,
+        time_point = as.character(
+          paste0(
+            with_tz(start_datetime, "Europe/Copenhagen"),
+            " - ",
+            with_tz(end_datetime, "Europe/Copenhagen")
+          )
+        )
+      ),
+    by = "id"
+  ) %>%
+  relocate(id, ssid, responsible_site, source, time_point, variable, value, issue_type, note)
+
+# -------------------------------------------------
+# 6) Validation report
+# -------------------------------------------------
+
+validation_dates <- bind_rows(
+  baseline_issues,
+  issues_before_rand,
+  issues_after_90,
+  issues_after_death
+)
+
+# -------------------------------------------------
+# 7) Cleanup
+# -------------------------------------------------
+
+rm(
+  anchors,
+  anchors_date_long,
+  anchors_date_wide,
+  baseline_issues,
+  death_time,
+  events,
+  events_with_anchor,
+  issues_after_90,
+  issues_after_death,
+  issues_before_rand,
+  consent_events,
+  albumin_keep,
+  incept_keep,
+  form_date_vars,
+  eop_susar_events
+)
 ```
 
 ### 4.5 Logical issues
