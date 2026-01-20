@@ -196,8 +196,8 @@ EMPRESS_forms_screening <- EMPRESS_forms %>%
       # Inclusion criteria
       "age_ge_18",
       "sepsis",
-      "acutely_critically_ill",
       "indication_for_empirical_antibiotics",
+      "acutely_critically_ill",
       # Exclusion criteria
       "infection_multiresistent_bacteria",
       "use_of_valproat",
@@ -262,6 +262,7 @@ EMPRESS_forms_baseline <- EMPRESS_forms %>%
       "type_of_bacteria",
       "resistance_to_piperacillin_tazobactam",
       "resistance_to_meropenem",
+      "use_of_respiratory_support_at_randomisation",
       "type_of_respiratory_support",
       "fio2_before_randomisation",
       "max_oxygen_flow_at_randomisation",
@@ -386,7 +387,8 @@ EMPRESS_forms_all <- bind_rows(
 # 1) Subset events on enrolled participants
 #------------------------------------------------------------
 EMPRESS_events_enrol <- EMPRESS_events %>% 
-  filter(ssid %in% EMPRESS_master_feasibility$ssid)
+  filter(ssid %in% EMPRESS_master_feasibility$ssid) %>%
+  mutate(source = "empress_events")
  
 #------------------------------------------------------------
 # 2) All events
@@ -591,8 +593,6 @@ validation_outliers_pct <- validation_outliers_pct %>%
     )
   )
 
-view(validation_outliers_pct)
-
 # -------------------------------------------------
 # 4) Cleanup
 # -------------------------------------------------
@@ -697,10 +697,10 @@ anchors <- EMPRESS_master_feasibility %>%
 # -------------------------------------------------
 # 2) Build canonical event log (EMPRESS) in long format
 # -------------------------------------------------
-empress_plat_keep <- c(
+empress_keep <- c(
   "death",
-  "withdrawn_consent",
-  "clinical_decision",
+  "withdrawn_consent_empress",
+  "clinical_decision_empress",
   "discontinuation_therapy",
   "involuntary_hospitalisation",
   "sar_susar",
@@ -709,23 +709,16 @@ empress_plat_keep <- c(
   "consent_from_relative",
   "consent_from_participant",
   "consent_obtained",
-  "relocate"
-)
+  "relocate")
 
-empress_dom_keep <- c(
-  "withdrawn_consent",
-  "clinical_decision",
-  "sar_susar",
-  "susar"
-)
 
 events <- events_master_enrol %>%
-  filter(event_type_name %in% c(empress_plat_keep, empress_dom_keep)) %>%
+  filter(event_type_name %in% empress_keep) %>%
   mutate(
     event_time_local = with_tz(timestamp, "Europe/Copenhagen"),
     id = event_id
   ) %>%
-  select(id, ssid, event_description, responsible_site, event_type_name, event_time_local)
+  select(id, ssid, source, responsible_site, event_type_name, event_time_local)
 
 # -------------------------------------------------
 # 3) Define event groups
@@ -831,8 +824,7 @@ issues_after_death <- events %>%
 # -------------------------------------------------
 # 5) Baseline validation
 # -------------------------------------------------
-
-baseline_issues <- anchors %>%
+issues_baseline <- anchors %>%
   rowwise() %>%
   transmute(
     ssid,
@@ -861,12 +853,10 @@ baseline_issues <- anchors %>%
 
       dob <- date_of_birth
       hosp <- date_of_index_hospital_admission
-      icu <- date_of_index_icu_admission
       rdt <- rand_date
 
       dob_id <- date_of_birth__id
       hosp_id <- date_of_index_hospital_admission__id
-      icu_id <- date_of_index_icu_admission__id
 
       if (!is.na(dob) && dob > Sys.Date()) {
         out <- add_issue(out, "date_of_birth", "hard", dob, "DOB is in the future", dob_id)
@@ -896,35 +886,11 @@ baseline_issues <- anchors %>%
         )
       }
 
-      if (!is.na(icu) && !is.na(dob) && icu < dob) {
-        out <- add_issue(
-          out, "date_of_index_icu_admission", "hard", icu,
-          paste0("ICU admission (", icu, ") before DOB (", dob, ")"),
-          icu_id
-        )
-      }
-
-      if (!is.na(hosp) && !is.na(icu) && icu < hosp) {
-        out <- add_issue(
-          out, "date_of_index_icu_admission", "hard", icu,
-          paste0("ICU admission (", icu, ") before hospital admission (", hosp, ")"),
-          icu_id
-        )
-      }
-
       if (!is.na(hosp) && !is.na(rdt) && hosp > rdt) {
         out <- add_issue(
           out, "date_of_index_hospital_admission", "hard", hosp,
           paste0("Index hospital admission (", hosp, ") is after randomisation date (", rdt, ")"),
           hosp_id
-        )
-      }
-
-      if (!is.na(icu) && !is.na(rdt) && icu > rdt) {
-        out <- add_issue(
-          out, "date_of_index_icu_admission", "hard", icu,
-          paste0("Index ICU admission (", icu, ") is after randomisation date (", rdt, ")"),
-          icu_id
         )
       }
 
@@ -936,14 +902,6 @@ baseline_issues <- anchors %>%
         )
       }
 
-      if (!is.na(icu) && !is.na(rdt) && interval(icu, rdt) > years(1)) {
-        out <- add_issue(
-          out, "date_of_index_icu_admission", "soft", icu,
-          paste0("ICU admission (", icu, ") is > 1 year before randomisation (", rdt, ")"),
-          icu_id
-        )
-      }
-
       out
     })
   ) %>%
@@ -951,7 +909,7 @@ baseline_issues <- anchors %>%
   unnest(issues) %>%
   filter(!is.na(variable)) %>%
   left_join(
-    ALBUMIN_forms_all %>%
+    EMPRESS_forms_all %>%
       transmute(
         id = observation_id,
         source = form_layout,
@@ -972,7 +930,7 @@ baseline_issues <- anchors %>%
 # -------------------------------------------------
 
 validation_dates <- bind_rows(
-  baseline_issues,
+  issues_baseline,
   issues_before_rand,
   issues_after_90,
   issues_after_death
@@ -986,7 +944,7 @@ rm(
   anchors,
   anchors_date_long,
   anchors_date_wide,
-  baseline_issues,
+  issues_baseline,
   death_time,
   events,
   events_with_anchor,
@@ -994,8 +952,7 @@ rm(
   issues_after_death,
   issues_before_rand,
   consent_events,
-  albumin_keep,
-  incept_keep,
+  empress_keep,
   form_date_vars,
   eop_susar_events
 )
@@ -1006,13 +963,293 @@ rm(
 #### 4.5.1 Screening / baseline issues
 
 ```{r}
+# -------------------------------------------------
+# 1) Build anchor with relevant baseline / screening vars 
+# -------------------------------------------------
+# Get relevant vars
+screening_vars <- c("use_of_circulatory_support_at_randomisation",
+                    "use_of_respiratory_support_at_randomisation",
+                    "rrt_within_72h_before_randomisation",
+                    "acutely_critically_ill"
+                    )
 
+baseline_vars <- c("chronic_rrt",
+                  "use_of_respiratory_support_at_randomisation"
+                  )
+
+# Build screening and baseline anchor
+anchor_screening <- EMPRESS_forms_all %>%
+  filter(ssid %in% EMPRESS_master_feasibility$ssid) %>%  # enrolled participants only
+  filter(
+    form_layout == "empress_domain_screening" & variable_name %in% screening_vars
+    )
+  
+anchor_baseline <- EMPRESS_forms_all %>% 
+  filter(
+    form_layout == "empress_baseline" & variable_name %in% baseline_vars
+    )
+
+# -------------------------------------------------
+# 2) Combine anchors while preserving data provenence
+# -------------------------------------------------
+# Combine anchors
+anchor <- bind_rows(anchor_screening, anchor_baseline) %>%
+  mutate(
+    ssid = as.character(ssid),
+    enrolment_site = as.character(responsible_site),
+    observation_id = as.character(observation_id),
+    source = case_when(
+      form_layout == "empress_domain_screening" ~ "screening",
+      form_layout == "empress_baseline"  ~ "baseline",
+      TRUE ~ NA_character_
+    ),
+    colname = paste0(source, "__", variable_name)
+  )
+
+# Wide values
+anchor_wide_vals <- anchor %>%
+  select(ssid, enrolment_site, colname, value) %>%
+  pivot_wider(
+    id_cols = c(ssid, enrolment_site),
+    names_from = colname,
+    values_from = value,
+    values_fill = NA_character_
+  )
+
+# Wide observation IDs (suffix columns)
+anchor_wide_ids <- anchor %>%
+  mutate(colname_id = paste0(colname, "__observation_id")) %>%
+  select(ssid, enrolment_site, colname_id, observation_id) %>%
+  pivot_wider(
+    id_cols = c(ssid, enrolment_site),
+    names_from = colname_id,
+    values_from = observation_id,
+    values_fill = NA_character_
+  )
+
+# Combine + parse
+bool_cols <- anchor_wide_vals %>% 
+  select(-ssid, -enrolment_site) %>% 
+  names()
+
+anchor_wide <- anchor_wide_vals %>%
+  left_join(anchor_wide_ids, by = c("ssid", "enrolment_site"))
+
+# -------------------------------------------------
+# 2) Within anchor validation 
+# -------------------------------------------------
+# Rule 1) Critically ill, but is not recieving either respiratory or circulatory support
+issue_anchor_critically_illness <- anchor_wide %>%
+  mutate(
+    # Rule violation: A == Yes but neither R nor C == Yes
+    rule_violation =
+      screening__acutely_critically_ill == "Yes" &
+      !(screening__use_of_respiratory_support_at_randomisation == "Yes" |
+        screening__use_of_circulatory_support_at_randomisation == "Yes")
+  ) %>%
+  filter(rule_violation) %>%
+  transmute(
+    ssid,
+    var_1_id = screening__acutely_critically_ill__observation_id,
+    var_2_id = screening__use_of_respiratory_support_at_randomisation__observation_id,
+    var_3_id = screening__use_of_circulatory_support_at_randomisation__observation_id,
+    var_1_site = enrolment_site,
+    var_2_site = enrolment_site,
+    var_3_site = enrolment_site,
+    var_1 = "screening_acutely_critically_ill",
+    var_2 = "screening_use_of_respiratory_support_at_randomisation",
+    var_3 = "screening_use_of_circulatory_support_at_randomisation",
+    value_1 = screening__acutely_critically_ill,
+    value_2 = screening__use_of_respiratory_support_at_randomisation,
+    value_3 = screening__use_of_circulatory_support_at_randomisation,
+    issue_type = "hard",
+    note = paste0(
+      "Acutely critically ill = ", screening__acutely_critically_ill,
+      ". If this is Yes, then at least one of: respiratory support (",
+      screening__use_of_respiratory_support_at_randomisation,
+      ") or circulatory support (",
+      screening__use_of_circulatory_support_at_randomisation,
+      ") must be Yes."
+    )
+  )
+
+# Rule 2) Is respraitory support at screening = Yes and baseline = No or vice versa?
+issue_anchor_respiratory_support_screening_vs_baseline <- anchor_wide %>%
+  mutate(
+    # Rule violation: screening and baseline disagree (Yes vs No)
+    rule_violation =
+      (screening__use_of_respiratory_support_at_randomisation == "Yes" &
+         baseline__use_of_respiratory_support_at_randomisation == "No") |
+      (screening__use_of_respiratory_support_at_randomisation == "No" &
+         baseline__use_of_respiratory_support_at_randomisation == "Yes")
+  ) %>%
+  filter(rule_violation) %>%
+  transmute(
+    ssid,
+    var_1_id = screening__use_of_respiratory_support_at_randomisation__observation_id,
+    var_2_id = baseline__use_of_respiratory_support_at_randomisation__observation_id,
+    var_1_site = enrolment_site,
+    var_2_site = enrolment_site,
+    var_1 = "screening_use_of_respiratory_support_at_randomisation",
+    var_2 = "baseline_use_of_respiratory_support_at_randomisation",
+    value_1 = screening__use_of_respiratory_support_at_randomisation,
+    value_2 = baseline__use_of_respiratory_support_at_randomisation,
+    issue_type = "hard",
+    note = paste0(
+      "Respiratory support mismatch between screening and baseline: screening = ",
+      screening__use_of_respiratory_support_at_randomisation,
+      ", baseline = ",
+      baseline__use_of_respiratory_support_at_randomisation,
+      ". Values should not be opposite (Yes vs No)."
+    )
+  )
 ```
 
 #### 4.5.2 Screening / baseline / dayform issues
 
 ```{r}
+# -------------------------------------------------
+# 1) Build first trial day (incept_albumin_dayform_1_to_90) with observation ids
+# -------------------------------------------------
+# Get relevant vars
+day_vars <- c("invasive_mechanical_ventilation",
+              "circulatory_support_min_1h"
+              )
 
+# First trial dayform day 1 - 90 with relevant vars, long format
+first_dayform_1_to_90_long <- ALBUMIN_forms_all %>% 
+  filter(form_layout == "incept_albumin_dayform_1_to_90",
+         variable_name %in% day_vars
+         ) %>% 
+  mutate(value_bool = to_bool(value)) %>% 
+  arrange(ssid, start_datetime) %>% 
+  group_by(ssid) %>% 
+  filter(start_datetime == first(start_datetime)) %>% 
+  ungroup()
+
+# Pivot values wide
+first_dayform_vals<- first_dayform_1_to_90_long %>% 
+  select(ssid, responsible_site, start_datetime, 
+         end_datetime, variable_name, value_bool) %>% 
+  pivot_wider(
+    id_cols = c(ssid, responsible_site, start_datetime, end_datetime),
+    names_from = variable_name,
+    values_from = value_bool
+  )
+
+# Pivot oberservation ids wide
+first_dayform_ids <- first_dayform_1_to_90_long %>%
+  mutate(var_id = paste0(variable_name, "__observation_id")) %>%
+  select(ssid, responsible_site, start_datetime, end_datetime, var_id, observation_id) %>%
+  pivot_wider(
+    id_cols = c(ssid, responsible_site, start_datetime, end_datetime),
+    names_from = var_id,
+    values_from = observation_id
+  )
+
+# Merge 
+first_trial_dayform_1_to_90_wide <- first_dayform_vals %>% 
+  left_join(first_dayform_ids,
+            by = c("ssid", "responsible_site", "start_datetime", "end_datetime")
+            ) %>% 
+  rename(
+    first_instance_mv = invasive_mechanical_ventilation,
+    first_instance_mv_obsid = invasive_mechanical_ventilation__observation_id,
+    first_instance_circ = circulatory_support_min_1h,
+    first_instance_circ_obsid = circulatory_support_min_1h__observation_id
+  )
+
+# -------------------------------------------------
+# 1) Anchor / dayform cross validation
+# -------------------------------------------------
+
+
+# 1) HARD: Use of MV on at randomisation but not on first instance trial dayform
+issues_anchor_day_mv <- anchor_wide %>% 
+  left_join(first_trial_dayform_1_to_90_wide,
+            by = "ssid") %>% 
+  filter(
+    screening__use_of_invasive_mechanical_ventilation_at_randomisation %in% TRUE &
+    !(first_instance_mv %in% TRUE) # 
+  ) %>% 
+  transmute(
+    ssid,
+    var_1_id = screening__use_of_invasive_mechanical_ventilation_at_randomisation__observation_id, 
+    var_2_id = first_instance_mv_obsid,
+    var_1_site = enrolment_site,
+    var_2_site = responsible_site,
+    var_1 = "use_of_invasive_mechanical_ventilation_at_randomisation",
+    var_2 = "invasive mechanical ventilation",
+    value_1 = screening__use_of_invasive_mechanical_ventilation_at_randomisation,
+    value_2 = first_instance_mv,
+    issue_type = "hard",
+    note = paste0(
+      "MV at randomisation, so use of MV on day 1 must be TRUE (",
+      "MV at randomisation=", screening__use_of_invasive_mechanical_ventilation_at_randomisation,
+      "; MV on first day=", first_instance_mv,
+      ")." )
+  )
+
+# 2) SOFT: Ongiong vasopressor at randomisation but not on first instance trial dayform 
+
+issues_anchor_day_circ <- anchor_wide %>% 
+  left_join(first_trial_dayform_1_to_90_wide,
+            by = "ssid") %>% 
+  filter(
+    screening__ongoing_vasopressor_or_inotropic_agent %in% TRUE &
+    !(first_instance_circ %in% TRUE) # 
+  ) %>% 
+  transmute(
+    ssid,
+    var_1_id = 
+      screening__ongoing_vasopressor_or_inotropic_agent__observation_id,
+    var_2_id = first_instance_circ_obsid,
+    var_1_site = enrolment_site,
+    var_2_site = responsible_site,
+    var_1 = "ongoing_vasopressor_or_inotropic_agent",
+    var_2 = "circulatory support min 1h",
+    value_1 = screening__ongoing_vasopressor_or_inotropic_agent,
+    value_2 = first_instance_circ,
+    issue_type = "soft",
+    note = paste0(
+      "Vasopressor at randomisation, but not on day 1 (",
+      "vasopressor at randomisation = ", screening__ongoing_vasopressor_or_inotropic_agent,
+      "; vasopressor on first day = ", first_instance_mv,
+      ")." )
+  )
+
+
+# -------------------------------------------------
+# 2) Validation report
+# -------------------------------------------------
+
+validation_cross_form_logicals<- bind_rows(
+  issue_anchor_septic_shock,
+  issues_anchor_day_mv,
+  issues_anchor_day_circ
+) 
+
+
+# -------------------------------------------------
+# Cleanup
+# -------------------------------------------------
+
+rm(first_dayform_1_to_90_long,
+   first_dayform_ids,
+   first_dayform_vals,
+   first_trial_dayform_1_to_90_wide,
+   issue_anchor_septic_shock,
+   issues_anchor_day_circ,
+   issues_anchor_day_mv,
+   bool_cols,
+   baseline_vars,
+   screening_vars,
+   anchor,
+   anchor_baseline,
+   anchor_screening,
+   anchor_wide,
+   anchor_wide_ids,
+   anchor_wide_vals)
 ```
 
 #### 4.5.3 Within dayform issues
