@@ -379,7 +379,7 @@ EMPRESS_forms_all <- bind_rows(
   )
 ```
 
-### 3.8 Enrolled 
+### 3.8 Enrolled events
 
 ```{r}
 #------------------------------------------------------------
@@ -390,3 +390,182 @@ EMPRESS_events_enrol <- EMPRESS_events %>%
 ```
 
 ## 4.0 Data cleaning
+
+### 4.1 Helper functions
+
+```{r}
+# Helper 1: detect missing 
+na_blank <- function(x) {
+  x <- str_squish(as.character(x))
+  x[x %in% c("", "NA", "NaN", "None", "na", "none", "nan")] <- NA_character_
+  x
+}
+
+# Helper 2: to numeric
+to_numeric <- function(x) {
+
+  if (is.numeric(x)) return(x)
+
+  x_chr <- str_to_lower(str_squish(as.character(x)))
+
+  # Explicit missing encodings
+  x_chr[x_chr %in% c("", "NA", "NaN", "None", "na", "none", "nan")] <- NA_character_
+
+  # Allow signed numeric values (incl. negatives)
+  is_num <- stringr::str_detect(
+    x_chr,
+    "^[-+]?[0-9]*\\.?[0-9]+$"
+  )
+  is_num[is.na(is_num)] <- FALSE
+
+  out <- rep(NA_real_, length(x_chr))
+  out[is_num] <- as.numeric(x_chr[is_num])
+
+  out
+}
+
+# Helper 3
+to_bool <- function(x) {
+  x <- tolower(trimws(as.character(x)))
+  dplyr::case_when(
+    x %in% c("true","t","1","yes","y")  ~ TRUE,
+    x %in% c("false","f","0","no","n")  ~ FALSE,
+    TRUE ~ NA
+  )
+}
+```
+
+### 4.2 Outliers
+
+#### 4.2.1 Outliers by hard/soft boundries
+
+```{r}
+# -------------------------------------------------
+# 1) Define validation rules for baseline and baseline-like variables
+# -------------------------------------------------
+
+# Hard bounds = impossible/outside absolute physiological or data constraints
+# Soft bounds = clinically implausible (flag for review), but possible
+
+
+# Define hard/soft boundaries (match easyRF, except highest lactate)
+rules <- tibble::tribble(
+  ~variable, ~hard_lo, ~hard_hi, ~soft_lo, ~soft_hi, ~unit,
+  
+  # Baseline variables
+  "weight", 20,  500,  22,  150, "kg", 
+  "height", 120,  240, 150,  200, "cm",
+  "systolic_blood_pressure_lowest", 30,  300,  75,  200, "mmHg", 
+  "crystalloid_volumes_within_24h", 0, 30000, 0, 9999, "mL",
+  "lowest_p_albumin_within_24h", 1, 115, 6, 33, "g/L",
+  "lactate_highest", 2, 40, 2,  13, "mmol/L", 
+    # Changed from easyRF boundaries as plasma lactate >= 2 within 3 hours of randomisation is an inclusion criteria in INCEPT-ALBUMIN. 
+  "creatinine_highest", 15, 2500,  26, 590, "µmol/L",
+  
+  # Dayform variables
+  "albumin_volume_5percent", 0, 9999, 0, 4999, "mL",
+  "albumin_volume_20percent", 0, 9999, 0, 4999, "mL",
+  "total_volume_rbc", 0, 29999, 0, 9999, "mL",
+  "total_fluid_input", 0, 39999, 0, 9999, "mL",
+  "total_fluid_balance", -19999, 19999, -9999, 9999, "mL"
+) 
+
+# -------------------------------------------------
+# 2) Restrict to variables to those present in rules and 
+#    - create raw value for reporting (preserves original)
+#    - create numeric value with missing detected 
+#    - filter on non-missing values
+# -------------------------------------------------
+
+ALBUMIN_forms_numeric <- ALBUMIN_forms_all %>% 
+  filter(variable_name %in% rules$variable) %>% 
+  mutate(
+    value_raw = as.character(value),
+    value_num = to_numeric(value_raw)) %>% 
+  filter(!is.na(value_num))
+
+# -------------------------------------------------
+# 3) Join validation rules and apply rules 
+# -------------------------------------------------
+
+ALBUMIN_forms_numeric_validation <- ALBUMIN_forms_numeric %>% 
+  inner_join(
+    rules,
+    by = c("variable_name" = "variable")
+  ) %>% mutate(
+    issue_type = case_when(
+      value_num < hard_lo | value_num > hard_hi ~ "hard_outlier",
+      value_num < soft_lo | value_num > soft_hi ~ "soft_outlier",
+      TRUE ~ "ok"
+    ),
+    source = form_layout
+  ) 
+
+# -------------------------------------------------
+# 4) Validation report
+#    - Change datetimes to local time [Make generic at some point]
+# -------------------------------------------------
+validation_outliers_boundaries <- ALBUMIN_forms_numeric_validation %>% 
+  filter(issue_type %in% c("hard_outlier", "soft_outlier")) %>% 
+  transmute(
+    id = observation_id,
+    ssid,
+    responsible_site,
+    source,
+    time_point = paste0(with_tz(start_datetime, "Europe/Copenhagen"),
+                        " - ",
+                        with_tz(start_datetime, "Europe/Copenhagen")
+                        ),
+    variable_name,
+    value = value_raw,
+    issue_type,
+    note = 
+      case_when(
+      issue_type == "hard_outlier" 
+      ~ paste0("Outside hard bounds [", hard_lo, ", ", hard_hi, "] ", unit),
+      issue_type == "soft_outlier" 
+      ~ paste0("Outside soft bounds [", soft_lo, ", ", soft_hi, "] ", unit),
+      TRUE ~ NA_character_
+      )
+    )
+
+validation_outliers_boundaries
+```
+
+#### 4.2.2 Outliers by distribution
+
+```{r}
+
+```
+
+### 4.3 Missing 
+
+```{r}
+
+```
+
+### 4.4 Date issues
+
+```{r}
+
+```
+
+### 4.5 Logical issues
+
+#### 4.5.1 Screening / baseline issues
+
+```{r}
+
+```
+
+#### 4.5.2 Screening / baseline / dayform issues
+
+```{r}
+
+```
+
+#### 4.5.3 Within dayform issues
+
+```{r}
+
+```
