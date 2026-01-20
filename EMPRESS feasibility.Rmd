@@ -20,9 +20,9 @@ library(janitor)
 ```{r include=FALSE}
 # -------- Paths to exported data files --------
 data_dir <- "C:/Users/nmei0013/Downloads"
-f_forms <- file.path(data_dir, "export-export_forms_empress_domain_20251221105418.parquet")
-f_events <- file.path(data_dir, "export-export_events_empress_platform_20251209150608.parquet")
-allocation <- file.path(data_dir, "export-export_allocations_empress_domain_20251212112744.parquet")
+f_forms <- file.path(data_dir, "export-export_forms_empress_domain_20260120103346.parquet")
+f_events <- file.path(data_dir, "export-export_events_empress_platform_20260120103321.parquet")
+allocation <- file.path(data_dir, "export-export_allocations_empress_domain_20260120103346.parquet")
 
 # -------- Load data from parquet files --------
 EMPRESS_forms <- read_parquet(f_forms)
