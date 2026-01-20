@@ -725,7 +725,7 @@ events <- events_master_enrol %>%
     event_time_local = with_tz(timestamp, "Europe/Copenhagen"),
     id = event_id
   ) %>%
-  select(id, ssid, source, responsible_site, event_type_name, event_time_local)
+  select(id, ssid, event_description, responsible_site, event_type_name, event_time_local)
 
 # -------------------------------------------------
 # 3) Define event groups
