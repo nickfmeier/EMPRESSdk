@@ -21,9 +21,9 @@ library(uuid)
 ```{r include=FALSE}
 # -------- Paths to exported data files --------
 data_dir <- "C:/Users/nmei0013/Downloads"
-f_forms <- file.path(data_dir, "export-export_forms_empress_domain_20260120103346.parquet")
-f_events <- file.path(data_dir, "export-export_events_empress_platform_20260120103321.parquet")
-allocation <- file.path(data_dir, "export-export_allocations_empress_domain_20260120103346.parquet")
+f_forms <- file.path(data_dir, "export-export_forms_empress_domain_20260123110315.parquet")
+f_events <- file.path(data_dir, "export-export_events_empress_platform_20260123110248.parquet")
+allocation <- file.path(data_dir, "export-export_allocations_empress_domain_20260123110315.parquet")
 
 # -------- Load data from parquet files --------
 EMPRESS_forms <- read_parquet(f_forms)
@@ -1107,7 +1107,7 @@ issue_anchor_respiratory_support_screening_vs_baseline <- anchor_wide %>%
 
 #### 4.5.2 Screening / baseline / dayform issues
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 # -------------------------------------------------
 # 1) Build first trial day (incept_albumin_dayform_1_to_90) with observation ids
 # -------------------------------------------------
@@ -1162,8 +1162,6 @@ first_trial_dayform_1_to_90_wide <- first_dayform_vals %>%
 # -------------------------------------------------
 # 1) Anchor / dayform cross validation
 # -------------------------------------------------
-
-
 # 1) HARD: Use of MV on at randomisation but not on first instance trial dayform
 issues_anchor_day_mv <- anchor_wide %>% 
   left_join(first_trial_dayform_1_to_90_wide,
@@ -1191,7 +1189,6 @@ issues_anchor_day_mv <- anchor_wide %>%
   )
 
 # 2) SOFT: Ongiong vasopressor at randomisation but not on first instance trial dayform 
-
 issues_anchor_day_circ <- anchor_wide %>% 
   left_join(first_trial_dayform_1_to_90_wide,
             by = "ssid") %>% 
@@ -1222,7 +1219,6 @@ issues_anchor_day_circ <- anchor_wide %>%
 # -------------------------------------------------
 # 2) Validation report
 # -------------------------------------------------
-
 validation_cross_form_logicals<- bind_rows(
   issue_anchor_septic_shock,
   issues_anchor_day_mv,
@@ -1233,7 +1229,6 @@ validation_cross_form_logicals<- bind_rows(
 # -------------------------------------------------
 # Cleanup
 # -------------------------------------------------
-
 rm(first_dayform_1_to_90_long,
    first_dayform_ids,
    first_dayform_vals,
@@ -1261,7 +1256,6 @@ rm(first_dayform_1_to_90_long,
 ## 5.0 Creation of master set for analysis
 
 ```{r}
-EMPRESS_master_feasibility
 ```
 
 ### 5.1 Addition of feasibility variables
@@ -1282,7 +1276,7 @@ event_flags <- EMPRESS_events %>%
     # TRUE if the participant ever died
     death = any(event_type_name == "death", na.rm = TRUE),
 
-    # Time of death (earliest parsable death timestamp)
+    # Time of death (earliest death timestamp)
     tod = {
       death_ts <- timestamp[event_type_name == "death"]
       if (length(death_ts) == 0 || all(is.na(death_ts))) {
@@ -1298,18 +1292,24 @@ event_flags <- EMPRESS_events %>%
       na.rm = TRUE
     ),
 
-    # NA-aware data collection flag
+    # Data collection allowed logic
     data_collection_allowed = {
-      dca <- data_collection_allowed[event_type_name == "withdrawn_consent_empress"]
-
-      if (length(dca) == 0) {
-        FALSE                         # no withdrawal → not allowed
-      } else if (any(dca == "yes", na.rm = TRUE)) {
-        TRUE                          # at least one explicit YES
-      } else if (all(is.na(dca))) {
-        NA                            # withdrawal but only NA info
+      if (!withdrawn_consent_empress) {
+        TRUE   # never withdrew → data collection allowed
       } else {
-        FALSE                         # explicit NO (possibly mixed with NA)
+        dca <- data_collection_allowed[
+          event_type_name == "withdrawn_consent_empress"
+        ]
+
+        if (length(dca) == 0) {
+          NA
+        } else if (any(dca == "yes", na.rm = TRUE)) {
+          TRUE
+        } else if (all(is.na(dca))) {
+          NA
+        } else {
+          FALSE
+        }
       }
     },
 
@@ -1325,10 +1325,8 @@ EMPRESS_master_feasibility <- EMPRESS_master_feasibility %>%
   mutate(
     death = coalesce(death, FALSE),
     withdrawn_consent_empress = coalesce(withdrawn_consent_empress, FALSE)
-    # NOTE: data_collection_allowed is intentionally NOT coalesced
+    # NOTE: data_collection_allowed intentionally NOT coalesced
   )
-
-
 ```
 
 ```{r}
@@ -1336,6 +1334,13 @@ EMPRESS_master_feasibility <- EMPRESS_master_feasibility %>%
 # 3) Add treatment allocation 
 # --------------------------------------------------
 EMPRESS_forms_allocation <- EMPRESS_forms %>%
+  left_join(
+    EMPRESS_allocation %>%
+      select(ssid, allocated_arm),
+    by = "ssid"
+  )
+
+EMPRESS_master_feasibility <- EMPRESS_master_feasibility %>%
   left_join(
     EMPRESS_allocation %>%
       select(ssid, allocated_arm),
@@ -1395,7 +1400,7 @@ participants_with_violation <- EMPRESS_forms_allocation %>%
 EMPRESS_master_feasibility <- EMPRESS_master_feasibility %>% 
   left_join(
     participants_with_violation %>% 
-      select(ssid, protocol_violation),
+      select(ssid, protocol_violation, protocol_violation_n),
     by = "ssid"
   )
 
@@ -1409,7 +1414,162 @@ rm(
 ### 5.2 Addition of baseline variables
 
 ```{r}
+# --------------------------------------------------
+# 1) Keep baseline, screening and follow-up forms only
+# --------------------------------------------------
+EMPRESS_forms_baseline <- EMPRESS_forms %>%
+  filter(form_layout %in% c(
+    "empress_baseline",
+    "empress_domain_screening",
+    "empress_30_90_days_followup"
+  ))
 
+# --------------------------------------------------
+# 2) Identify duplicated variables per participant
+# --------------------------------------------------
+dups <- EMPRESS_forms_baseline %>%
+  summarise(n = n(), .by = c(ssid, variable_name)) %>%
+  filter(n > 1L)
+
+# --------------------------------------------------
+# 3a) Convert NON-microbiology baseline data from long to wide format
+# --------------------------------------------------
+EMPRESS_forms_baseline_wide <- EMPRESS_forms_baseline %>%
+  filter(!variable_name %in% c(
+    "type_of_sample",
+    "type_of_bacteria",
+    "resistance_to_piperacillin_tazobactam",
+    "resistance_to_meropenem"
+  )) %>%
+  select(ssid, variable_name, value) %>%
+  mutate(
+    ssid  = as.character(ssid),
+    value = na_if(trimws(as.character(value)), "")
+  ) %>%
+  pivot_wider(
+    names_from  = variable_name,
+    values_from = value,
+    values_fn   = ~ dplyr::first(na.omit(.x)),
+    values_fill = NA_character_
+  )
+
+# --------------------------------------------------
+# 3b) Extract 30_90_day_followup value + first_value_change (long -> 1 row/ssid)
+# --------------------------------------------------
+followup_lookup <- EMPRESS_forms_baseline %>%
+  filter(variable_name == "30_90_day_followup") %>%
+  transmute(
+    ssid                 = as.character(ssid),
+    `30_90_day_followup` = na_if(trimws(as.character(value)), ""),
+    first_value_change   = first_value_change
+  ) %>%
+  group_by(ssid) %>%
+  summarise(
+    `30_90_day_followup` = dplyr::first(na.omit(`30_90_day_followup`)),
+    first_value_change   = dplyr::first(na.omit(first_value_change)),
+    .groups = "drop"
+  )
+
+# --------------------------------------------------
+# 3c) Join followup info to feasibility master and place columns after tod
+# --------------------------------------------------
+EMPRESS_master_feasibility <- EMPRESS_master_feasibility %>%
+  mutate(ssid = as.character(ssid)) %>%
+  left_join(followup_lookup, by = "ssid") %>%
+  relocate(`30_90_day_followup`, first_value_change, .after = tod)
+
+# --------------------------------------------------
+# 4) Create baseline_bacterial_cultures in LONG format
+# --------------------------------------------------
+baseline_bacterial_cultures <- EMPRESS_forms_baseline %>%
+  filter(variable_name %in% c(
+    "type_of_sample",
+    "type_of_bacteria",
+    "resistance_to_piperacillin_tazobactam",
+    "resistance_to_meropenem",
+    "positive_bacterial_culture"
+  )) %>%
+  transmute(
+    ssid = as.character(ssid),
+    childset_group = as.character(childset_group),
+    parent_observation_id = as.character(parent_observation_id),
+    variable = factor(
+      variable_name,
+      levels = c(
+        "type_of_sample",
+        "type_of_bacteria",
+        "resistance_to_piperacillin_tazobactam",
+        "resistance_to_meropenem",
+        "positive_bacterial_culture"
+      )
+    ),
+    value = na_if(trimws(as.character(value)), "")
+  ) %>%
+  filter(!is.na(value)) %>%
+  arrange(
+    ssid,
+    desc(is.na(childset_group)),  # NA childset_group FIRST (master row)
+    childset_group,               # then sort by childset_group
+    variable                       # then your enforced variable order
+  )
+
+# --------------------------------------------------
+# 5) Baseline variables + bacterial flag to feasibility master
+# --------------------------------------------------
+EMPRESS_master_feasibility <- EMPRESS_master_feasibility %>%
+  mutate(ssid = as.character(ssid)) %>%
+  left_join(
+    EMPRESS_forms_baseline_wide %>%
+      select(
+        ssid,
+        date_of_birth,
+        sex,
+        weight,
+        height,
+        ischemic_heart_disease,
+        diabetes,
+        chronic_pulmonary_disease,
+        haematological_or_metastatic_cancer,
+        immunosuppression,
+        organ_transplantation,
+        chronic_rrt,
+        chronic_liver_disease,
+        clinical_frailty_scale,
+        limitations_of_care,
+        date_of_index_hospital_admission,
+        department_at_which_the_participant_was_included,
+        acute_surgical_admission,
+        primary_site_of_infection,
+        positive_bacterial_culture,
+        use_of_respiratory_support_at_randomisation,
+        type_of_respiratory_support,
+        fio2_before_randomisation,
+        max_oxygen_flow_at_randomisation,
+        arterial_blood_gas_available,
+        arterial_oxygen_saturation,
+        pao2,
+        peripheral_oxygen_saturation,
+        systolic_blood_pressure_lowest,
+        lactate_highest,
+        creatinine_highest,
+        use_of_circulatory_support_at_randomisation,
+        rrt_within_72h_before_randomisation,
+        treatment_with_antibacterial_agent_prior_to_randomisation,
+        anti_bacterial_agent
+      ),
+    by = "ssid"
+  ) 
+
+rm(
+  dups,
+  EMPRESS_forms_baseline,
+  EMPRESS_forms_baseline_wide, 
+  followup_lookup
+)
 ```
 
 ### 5.3 Addition of dayform variables
+
+```{r}
+
+```
